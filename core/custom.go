@@ -44,7 +44,7 @@ func hasOutboundWithTag(list []*core.OutboundHandlerConfig, tag string) bool {
 
 func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, error) {
 	//dns
-	queryStrategy := "UseIPv4v6"
+	queryStrategy := "UseIPv6v4"
 	if !hasPublicIPv6() {
 		queryStrategy = "UseIPv4"
 	}
