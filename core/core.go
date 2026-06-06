@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -34,6 +35,9 @@ type V2Core struct {
 	ihm        inbound.Manager
 	ohm        outbound.Manager
 	dispatcher *dispatcher.DefaultDispatcher
+
+	shadowTLSMu       sync.Mutex
+	shadowTLSRuntimes map[string]*shadowTLSRuntime
 }
 
 type UserMap struct {
@@ -47,6 +51,7 @@ func New(config *conf.Conf) *V2Core {
 		users: &UserMap{
 			uidMap: make(map[string]int),
 		},
+		shadowTLSRuntimes: make(map[string]*shadowTLSRuntime),
 	}
 	return core
 }
@@ -71,11 +76,12 @@ func (v *V2Core) Close() error {
 	v.ihm = nil
 	v.ohm = nil
 	v.dispatcher = nil
+	closeErr := v.closeAllShadowTLSRuntimes()
 	err := v.Server.Close()
 	if err != nil {
-		return err
+		return errors.Join(closeErr, err)
 	}
-	return nil
+	return closeErr
 }
 
 func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
