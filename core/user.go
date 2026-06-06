@@ -24,6 +24,10 @@ import (
 	"github.com/xtls/xray-core/proxy/vless"
 )
 
+var getUserManagerForCore = func(v *V2Core, tag string) (proxy.UserManager, error) {
+	return v.GetUserManager(tag)
+}
+
 func (v *V2Core) GetUserManager(tag string) (proxy.UserManager, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -43,7 +47,7 @@ func (v *V2Core) GetUserManager(tag string) (proxy.UserManager, error) {
 }
 
 func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
-	userManager, err := vc.GetUserManager(tag)
+	userManager, err := getUserManagerForCore(vc, tag)
 	if err != nil {
 		return fmt.Errorf("get user manager error: %s", err)
 	}
@@ -134,7 +138,7 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	default:
 		return 0, fmt.Errorf("unsupported node type: %s", p.NodeInfo.Type)
 	}
-	man, err := v.GetUserManager(p.Tag)
+	man, err := getUserManagerForCore(v, p.Tag)
 	if err != nil {
 		return 0, fmt.Errorf("get user manager error: %s", err)
 	}
