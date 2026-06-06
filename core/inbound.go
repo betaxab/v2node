@@ -59,6 +59,9 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	case "trojan":
 		err = buildTrojan(nodeInfo, in)
 	case "shadowsocks":
+		if nodeInfo.Security == panel.ShadowTLS {
+			return nil, errors.New("shadowtls nodes must be added through the shadowtls runtime path")
+		}
 		err = buildShadowsocks(nodeInfo, in)
 	case "hysteria2":
 		err = buildHysteria2(nodeInfo, in)

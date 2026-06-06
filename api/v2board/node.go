@@ -16,9 +16,10 @@ import (
 
 // Security type
 const (
-	None    = 0
-	Tls     = 1
-	Reality = 2
+	None      = 0
+	Tls       = 1
+	Reality   = 2
+	ShadowTLS = 3
 )
 
 type NodeInfo struct {
@@ -78,21 +79,37 @@ type BaseConfig struct {
 }
 
 type TlsSettings struct {
-	ServerName       string   `json:"server_name"`
-	ServerNames      []string `json:"server_names"`
-	Dest             string   `json:"dest"`
-	ServerPort       string   `json:"server_port"`
-	ShortId          string   `json:"short_id"`
-	ShortIds         []string `json:"short_ids"`
-	PrivateKey       string   `json:"private_key"`
-	Mldsa65Seed      string   `json:"mldsa65Seed"`
-	Xver             uint64   `json:"xver,string"`
-	CertMode         string   `json:"cert_mode"`
-	CertFile         string   `json:"cert_file"`
-	KeyFile          string   `json:"key_file"`
-	Provider         string   `json:"provider"`
-	DNSEnv           string   `json:"dns_env"`
-	RejectUnknownSni string   `json:"reject_unknown_sni"`
+	ServerName        string   `json:"server_name"`
+	ServerNames       []string `json:"server_names"`
+	Dest              string   `json:"dest"`
+	ServerPort        string   `json:"server_port"`
+	ShortId           string   `json:"short_id"`
+	ShortIds          []string `json:"short_ids"`
+	PrivateKey        string   `json:"private_key"`
+	Mldsa65Seed       string   `json:"mldsa65Seed"`
+	Xver              uint64   `json:"xver,string"`
+	CertMode          string   `json:"cert_mode"`
+	CertFile          string   `json:"cert_file"`
+	KeyFile           string   `json:"key_file"`
+	Provider          string   `json:"provider"`
+	DNSEnv            string   `json:"dns_env"`
+	RejectUnknownSni  string   `json:"reject_unknown_sni"`
+	Plugin            string   `json:"plugin"`
+	ShadowTLS         string   `json:"shadow_tls"`
+	ShadowTLSVersion  int      `json:"shadow_tls_version"`
+	ShadowTLSPassword string   `json:"shadow_tls_password"`
+	WildcardSNI       string   `json:"wildcard_sni"`
+}
+
+type ShadowTLSHandshake struct {
+	ServerName string
+	Host       string
+	Port       uint16
+}
+
+type ShadowTLSMapping struct {
+	Fallback               ShadowTLSHandshake
+	HandshakeForServerName map[string]ShadowTLSHandshake
 }
 
 type CertInfo struct {
@@ -157,15 +174,8 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode node params error: %s", err)
 	}
-	switch cm.Protocol {
-	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless":
-		node.Type = cm.Protocol
-		node.Security = cm.Tls
-	case "shadowsocks":
-		node.Type = cm.Protocol
-		node.Security = 0
-	default:
-		return nil, fmt.Errorf("unsupport protocol: %s", cm.Protocol)
+	if err := applyNodeProtocol(node, cm); err != nil {
+		return nil, err
 	}
 	node.Tag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, node.Id)
 	cf := cm.TlsSettings.CertFile
@@ -203,6 +213,197 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	node.Common = cm
 
 	return node, nil
+}
+
+func applyNodeProtocol(node *NodeInfo, cm *CommonNode) error {
+	switch cm.Protocol {
+	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless":
+		node.Type = cm.Protocol
+		node.Security = cm.Tls
+	case "shadowsocks":
+		node.Type = cm.Protocol
+		node.Security = None
+		if cm.IsShadowTLS() {
+			if err := cm.TlsSettings.ValidateShadowTLS(); err != nil {
+				return err
+			}
+			node.Security = ShadowTLS
+		}
+	default:
+		return fmt.Errorf("unsupport protocol: %s", cm.Protocol)
+	}
+	return nil
+}
+
+func (c *CommonNode) IsShadowTLS() bool {
+	return c.Protocol == "shadowsocks" && c.Tls == ShadowTLS
+}
+
+func (t TlsSettings) ValidateShadowTLS() error {
+	if strings.TrimSpace(t.Plugin) != "shadow-tls" {
+		return fmt.Errorf("shadowtls plugin must be shadow-tls")
+	}
+	if t.ShadowTLSVersion != 2 && t.ShadowTLSVersion != 3 {
+		return fmt.Errorf("shadowtls version must be 2 or 3")
+	}
+	if strings.TrimSpace(t.ShadowTLSPassword) == "" {
+		return fmt.Errorf("shadowtls password must not be empty")
+	}
+	if _, err := t.ParseShadowTLSMapping(); err != nil {
+		return err
+	}
+	if _, err := t.ShadowTLSWildcardSNI(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t TlsSettings) ParseShadowTLSMapping() (ShadowTLSMapping, error) {
+	shadowTLS := strings.TrimSpace(t.ShadowTLS)
+	if shadowTLS == "" {
+		return ShadowTLSMapping{}, fmt.Errorf("shadowtls mapping must not be empty")
+	}
+
+	rawEntries := strings.Split(shadowTLS, ";")
+	entries := make([]ShadowTLSHandshake, 0, len(rawEntries))
+	for _, rawEntry := range rawEntries {
+		entry, err := parseShadowTLSEntry(rawEntry)
+		if err != nil {
+			return ShadowTLSMapping{}, err
+		}
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		return ShadowTLSMapping{}, fmt.Errorf("shadowtls mapping must not be empty")
+	}
+
+	mapping := ShadowTLSMapping{
+		Fallback: entries[len(entries)-1],
+	}
+	if len(entries) > 1 {
+		mapping.HandshakeForServerName = make(map[string]ShadowTLSHandshake, len(entries)-1)
+		for _, entry := range entries[:len(entries)-1] {
+			if _, exists := mapping.HandshakeForServerName[entry.ServerName]; exists {
+				return ShadowTLSMapping{}, fmt.Errorf("shadowtls mapping server name must be unique")
+			}
+			mapping.HandshakeForServerName[entry.ServerName] = entry
+		}
+	}
+	return mapping, nil
+}
+
+func (t TlsSettings) ShadowTLSWildcardSNI() (string, error) {
+	mode := strings.TrimSpace(t.WildcardSNI)
+	if mode == "" {
+		mode = "off"
+	}
+	switch mode {
+	case "off", "authed", "all":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("shadowtls wildcard_sni must be off, authed, or all")
+	}
+}
+
+func parseShadowTLSEntry(rawEntry string) (ShadowTLSHandshake, error) {
+	entry := strings.TrimSpace(rawEntry)
+	if entry == "" {
+		return ShadowTLSHandshake{}, fmt.Errorf("shadowtls mapping entry must not be empty")
+	}
+	fields, err := splitShadowTLSEntry(entry)
+	if err != nil {
+		return ShadowTLSHandshake{}, err
+	}
+	if len(fields) == 0 || len(fields) > 3 {
+		return ShadowTLSHandshake{}, fmt.Errorf("shadowtls mapping entry must be ServerName[:Host[:Port]]")
+	}
+
+	serverName := strings.TrimSpace(fields[0])
+	if serverName == "" || strings.HasPrefix(serverName, "[") || strings.Contains(serverName, ":") {
+		return ShadowTLSHandshake{}, fmt.Errorf("shadowtls server name must be valid")
+	}
+
+	host := serverName
+	portText := "443"
+	switch len(fields) {
+	case 2:
+		second := strings.TrimSpace(fields[1])
+		if second == "" {
+			return ShadowTLSHandshake{}, fmt.Errorf("shadowtls host or port must not be empty")
+		}
+		if isPortText(second) {
+			portText = second
+		} else {
+			host = second
+		}
+	case 3:
+		host = strings.TrimSpace(fields[1])
+		portText = strings.TrimSpace(fields[2])
+	}
+	if host == "" {
+		return ShadowTLSHandshake{}, fmt.Errorf("shadowtls host must not be empty")
+	}
+	if strings.HasPrefix(host, "[") || strings.HasSuffix(host, "]") {
+		if !strings.HasPrefix(host, "[") || !strings.HasSuffix(host, "]") || len(host) <= 2 {
+			return ShadowTLSHandshake{}, fmt.Errorf("shadowtls bracket ipv6 host must be valid")
+		}
+	}
+	if strings.Contains(host, ":") && !(strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]")) {
+		return ShadowTLSHandshake{}, fmt.Errorf("shadowtls raw ipv6 host is ambiguous")
+	}
+
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return ShadowTLSHandshake{}, fmt.Errorf("shadowtls port must be a valid TCP port")
+	}
+
+	return ShadowTLSHandshake{
+		ServerName: serverName,
+		Host:       host,
+		Port:       uint16(port),
+	}, nil
+}
+
+func splitShadowTLSEntry(entry string) ([]string, error) {
+	fields := []string{}
+	start := 0
+	inBracket := false
+	for i, r := range entry {
+		switch r {
+		case '[':
+			if inBracket {
+				return nil, fmt.Errorf("shadowtls bracket ipv6 host must be valid")
+			}
+			inBracket = true
+		case ']':
+			if !inBracket {
+				return nil, fmt.Errorf("shadowtls bracket ipv6 host must be valid")
+			}
+			inBracket = false
+		case ':':
+			if !inBracket {
+				fields = append(fields, strings.TrimSpace(entry[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if inBracket {
+		return nil, fmt.Errorf("shadowtls bracket ipv6 host must be valid")
+	}
+	fields = append(fields, strings.TrimSpace(entry[start:]))
+	return fields, nil
+}
+
+func isPortText(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func intervalToTime(i interface{}) time.Duration {
