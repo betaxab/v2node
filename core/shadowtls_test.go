@@ -1,10 +1,14 @@
 package core
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-shadowtls"
 	M "github.com/sagernet/sing/common/metadata"
@@ -150,6 +154,147 @@ func TestBuildShadowTLSServiceConfigRejectsNilHandler(t *testing.T) {
 
 func TestShadowTLSBackendHandlerImplementsTCPConnectionHandlerEx(t *testing.T) {
 	var _ N.TCPConnectionHandlerEx = newShadowTLSBackendHandler(M.ParseSocksaddrHostPort("127.0.0.1", 12000))
+}
+
+func TestShadowTLSBackendHandlerPreservesHalfCloseDuringLargeBidirectionalTransfer(t *testing.T) {
+	const payloadSize = 4 << 20
+	deadline := time.Now().Add(10 * time.Second)
+
+	clientListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("listen for authenticated client: %v", err)
+	}
+	defer clientListener.Close()
+	if err := clientListener.SetDeadline(deadline); err != nil {
+		t.Fatalf("set authenticated client listener deadline: %v", err)
+	}
+
+	clientConn, err := net.DialTCP("tcp", nil, clientListener.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatalf("dial authenticated client connection: %v", err)
+	}
+	defer clientConn.Close()
+	relayConn, err := clientListener.AcceptTCP()
+	if err != nil {
+		t.Fatalf("accept authenticated client connection: %v", err)
+	}
+	defer relayConn.Close()
+	for name, conn := range map[string]*net.TCPConn{
+		"client": clientConn,
+		"relay":  relayConn,
+	} {
+		if err := conn.SetDeadline(deadline); err != nil {
+			t.Fatalf("set %s connection deadline: %v", name, err)
+		}
+	}
+
+	backendListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("listen for shadowtls backend: %v", err)
+	}
+	defer backendListener.Close()
+	if err := backendListener.SetDeadline(deadline); err != nil {
+		t.Fatalf("set shadowtls backend listener deadline: %v", err)
+	}
+	backendAddr := backendListener.Addr().(*net.TCPAddr)
+	handler := newShadowTLSBackendHandler(M.ParseSocksaddrHostPort(backendAddr.IP.String(), uint16(backendAddr.Port)))
+	onClose := make(chan error, 2)
+	handler.NewConnectionEx(context.Background(), relayConn, M.Socksaddr{}, M.Socksaddr{}, func(err error) {
+		onClose <- err
+	})
+
+	backendConn, err := backendListener.AcceptTCP()
+	if err != nil {
+		t.Fatalf("accept shadowtls backend connection: %v", err)
+	}
+	defer backendConn.Close()
+	if err := backendConn.SetDeadline(deadline); err != nil {
+		t.Fatalf("set shadowtls backend connection deadline: %v", err)
+	}
+
+	requestPattern := []byte("shadowtls-request-0123456789")
+	request := bytes.Repeat(requestPattern, payloadSize/len(requestPattern)+1)[:payloadSize]
+	responsePattern := []byte("shadowtls-response-9876543210")
+	response := bytes.Repeat(responsePattern, payloadSize/len(responsePattern)+1)[:payloadSize]
+
+	type backendResult struct {
+		request       []byte
+		readErr       error
+		responseBytes int64
+		writeErr      error
+		closeWriteErr error
+	}
+	backendDone := make(chan backendResult, 1)
+	go func() {
+		gotRequest, readErr := io.ReadAll(backendConn)
+		var responseBytes int64
+		var writeErr error
+		var closeWriteErr error
+		if readErr == nil {
+			responseBytes, writeErr = io.Copy(backendConn, bytes.NewReader(response))
+			if writeErr == nil {
+				closeWriteErr = backendConn.CloseWrite()
+			}
+		}
+		backendDone <- backendResult{
+			request:       gotRequest,
+			readErr:       readErr,
+			responseBytes: responseBytes,
+			writeErr:      writeErr,
+			closeWriteErr: closeWriteErr,
+		}
+	}()
+
+	requestBytes, requestWriteErr := io.Copy(clientConn, bytes.NewReader(request))
+	clientCloseWriteErr := clientConn.CloseWrite()
+	gotResponse, responseReadErr := io.ReadAll(clientConn)
+	result := <-backendDone
+
+	var closeErr error
+	select {
+	case closeErr = <-onClose:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for shadowtls backend handler onClose callback")
+	}
+
+	if requestWriteErr != nil {
+		t.Fatalf("client request write failed after %d bytes: %v", requestBytes, requestWriteErr)
+	}
+	if requestBytes != int64(len(request)) {
+		t.Fatalf("client request bytes = %d, want %d", requestBytes, len(request))
+	}
+	if clientCloseWriteErr != nil {
+		t.Fatalf("client CloseWrite() error = %v", clientCloseWriteErr)
+	}
+	if result.readErr != nil {
+		t.Fatalf("backend request read error = %v", result.readErr)
+	}
+	if !bytes.Equal(result.request, request) {
+		t.Fatalf("backend request mismatch: got %d bytes, want %d", len(result.request), len(request))
+	}
+	if result.writeErr != nil {
+		t.Fatalf("backend response write failed after request EOF at %d/%d bytes: %v", result.responseBytes, len(response), result.writeErr)
+	}
+	if result.responseBytes != int64(len(response)) {
+		t.Fatalf("backend response bytes = %d, want %d", result.responseBytes, len(response))
+	}
+	if result.closeWriteErr != nil {
+		t.Fatalf("backend CloseWrite() error = %v", result.closeWriteErr)
+	}
+	if responseReadErr != nil {
+		t.Fatalf("client response read error after %d/%d bytes: %v", len(gotResponse), len(response), responseReadErr)
+	}
+	if !bytes.Equal(gotResponse, response) {
+		t.Fatalf("client response mismatch: got %d bytes, want %d", len(gotResponse), len(response))
+	}
+	if closeErr != nil {
+		t.Fatalf("onClose error = %v, want nil", closeErr)
+	}
+	select {
+	case secondErr := <-onClose:
+		t.Fatalf("onClose called more than once; second error = %v", secondErr)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestAddNodeShadowTLSUsesRuntimePath(t *testing.T) {
