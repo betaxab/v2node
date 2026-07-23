@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"strconv"
 	"strings"
 
 	"github.com/sagernet/sing-shadowtls"
+	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -205,16 +205,7 @@ func (h *shadowTLSBackendHandler) handle(ctx context.Context, conn net.Conn, onC
 	}
 	defer backendConn.Close()
 
-	errCh := make(chan error, 2)
-	go func() {
-		_, err := io.Copy(backendConn, conn)
-		errCh <- err
-	}()
-	go func() {
-		_, err := io.Copy(conn, backendConn)
-		errCh <- err
-	}()
-	closeErr = <-errCh
+	closeErr = bufio.CopyConn(ctx, conn, backendConn)
 }
 
 func buildShadowTLSServiceConfig(nodeInfo *panel.NodeInfo, handler N.TCPConnectionHandlerEx) (shadowtls.ServiceConfig, error) {
