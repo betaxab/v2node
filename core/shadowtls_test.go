@@ -3,14 +3,18 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sagernet/sing-shadowtls"
+	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -294,6 +298,152 @@ func TestShadowTLSBackendHandlerPreservesHalfCloseDuringLargeBidirectionalTransf
 	case secondErr := <-onClose:
 		t.Fatalf("onClose called more than once; second error = %v", secondErr)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestShadowTLSV3SustainsLargeDownloadThroughAuthenticatedService(t *testing.T) {
+	const (
+		password    = "sentinel-shadowtls-password"
+		payloadSize = 4 << 20
+	)
+	deadline := time.Now().Add(15 * time.Second)
+
+	handshakeServer := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	handshakeServer.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		MaxVersion: tls.VersionTLS13,
+	}
+	handshakeServer.StartTLS()
+	defer handshakeServer.Close()
+
+	backendListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("listen for shadowtls backend: %v", err)
+	}
+	defer backendListener.Close()
+	if err := backendListener.SetDeadline(deadline); err != nil {
+		t.Fatalf("set shadowtls backend listener deadline: %v", err)
+	}
+	backendAddr := backendListener.Addr().(*net.TCPAddr)
+
+	service, err := shadowtls.NewService(shadowtls.ServiceConfig{
+		Version: 3,
+		Users: []shadowtls.User{{
+			Name:     shadowTLSV3UserName,
+			Password: password,
+		}},
+		Handshake: shadowtls.HandshakeConfig{
+			Server: M.SocksaddrFromNet(handshakeServer.Listener.Addr()),
+			Dialer: N.SystemDialer,
+		},
+		Handler: newShadowTLSBackendHandler(
+			M.ParseSocksaddrHostPort(backendAddr.IP.String(), uint16(backendAddr.Port)),
+		),
+		Logger: logger.NOP(),
+	})
+	if err != nil {
+		t.Fatalf("create shadowtls service: %v", err)
+	}
+
+	shadowListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("listen for shadowtls client: %v", err)
+	}
+	defer shadowListener.Close()
+	if err := shadowListener.SetDeadline(deadline); err != nil {
+		t.Fatalf("set shadowtls listener deadline: %v", err)
+	}
+
+	serviceResult := make(chan error, 1)
+	go func() {
+		conn, acceptErr := shadowListener.AcceptTCP()
+		if acceptErr != nil {
+			serviceResult <- acceptErr
+			return
+		}
+		_ = conn.SetDeadline(deadline)
+		serviceResult <- service.NewConnection(
+			context.Background(),
+			conn,
+			M.SocksaddrFromNet(conn.RemoteAddr()),
+			M.SocksaddrFromNet(conn.LocalAddr()),
+			func(error) {},
+		)
+	}()
+
+	client, err := shadowtls.NewClient(shadowtls.ClientConfig{
+		Version:  3,
+		Password: password,
+		Server:   M.SocksaddrFromNet(shadowListener.Addr()),
+		Dialer:   N.SystemDialer,
+		TLSHandshake: shadowtls.DefaultTLSHandshakeFunc(password, &tls.Config{
+			ServerName:         "example.com",
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS13,
+			MaxVersion:         tls.VersionTLS13,
+		}),
+		Logger: logger.NOP(),
+	})
+	if err != nil {
+		t.Fatalf("create shadowtls client: %v", err)
+	}
+	clientConn, err := client.DialContext(context.Background())
+	if err != nil {
+		t.Fatalf("dial shadowtls service: %v", err)
+	}
+	defer clientConn.Close()
+	if err := clientConn.SetDeadline(deadline); err != nil {
+		t.Fatalf("set shadowtls client deadline: %v", err)
+	}
+
+	request := []byte("start-download")
+	if _, err := clientConn.Write(request); err != nil {
+		t.Fatalf("write authenticated request: %v", err)
+	}
+
+	backendConn, err := backendListener.AcceptTCP()
+	if err != nil {
+		t.Fatalf("accept shadowtls backend connection: %v", err)
+	}
+	defer backendConn.Close()
+	if err := backendConn.SetDeadline(deadline); err != nil {
+		t.Fatalf("set shadowtls backend connection deadline: %v", err)
+	}
+	gotRequest := make([]byte, len(request))
+	if _, err := io.ReadFull(backendConn, gotRequest); err != nil {
+		t.Fatalf("read authenticated request at backend: %v", err)
+	}
+	if !bytes.Equal(gotRequest, request) {
+		t.Fatalf("backend request = %q, want %q", gotRequest, request)
+	}
+
+	payloadPattern := []byte("shadowtls-v3-download-0123456789")
+	payload := bytes.Repeat(payloadPattern, payloadSize/len(payloadPattern)+1)[:payloadSize]
+	writeResult := make(chan error, 1)
+	go func() {
+		_, writeErr := io.Copy(backendConn, bytes.NewReader(payload))
+		writeResult <- writeErr
+	}()
+
+	gotPayload := make([]byte, len(payload))
+	readBytes, readErr := io.ReadFull(clientConn, gotPayload)
+	if readErr != nil {
+		t.Fatalf("read shadowtls v3 download failed at %d/%d bytes: %v", readBytes, len(payload), readErr)
+	}
+	if writeErr := <-writeResult; writeErr != nil {
+		t.Fatalf("write shadowtls v3 backend response: %v", writeErr)
+	}
+	if !bytes.Equal(gotPayload, payload) {
+		t.Fatalf("shadowtls v3 response mismatch: got %d bytes, want %d", len(gotPayload), len(payload))
+	}
+
+	select {
+	case err := <-serviceResult:
+		if err != nil {
+			t.Fatalf("shadowtls service connection error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shadowtls service did not finish authentication")
 	}
 }
 

@@ -28,6 +28,16 @@ type shadowTLSBackendHandler struct {
 	backend M.Socksaddr
 }
 
+// Keep sing's relay from unwrapping the cached v3 connection into its unsafe
+// extended/vectorised writer while retaining TCP half-close support.
+type shadowTLSRelayConn struct {
+	net.Conn
+}
+
+func (c shadowTLSRelayConn) CloseWrite() error {
+	return N.CloseWrite(c.Conn)
+}
+
 type shadowTLSRuntime struct {
 	listener net.Listener
 	service  *shadowtls.Service
@@ -205,7 +215,7 @@ func (h *shadowTLSBackendHandler) handle(ctx context.Context, conn net.Conn, onC
 	}
 	defer backendConn.Close()
 
-	closeErr = bufio.CopyConn(ctx, conn, backendConn)
+	closeErr = bufio.CopyConn(ctx, shadowTLSRelayConn{Conn: conn}, backendConn)
 }
 
 func buildShadowTLSServiceConfig(nodeInfo *panel.NodeInfo, handler N.TCPConnectionHandlerEx) (shadowtls.ServiceConfig, error) {
