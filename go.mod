@@ -7,6 +7,8 @@ require (
 	github.com/go-acme/lego/v4 v4.25.2
 	github.com/go-resty/resty/v2 v2.16.5
 	github.com/juju/ratelimit v1.0.2
+	github.com/sagernet/sing v0.8.9
+	github.com/sagernet/sing-shadowtls v0.2.1
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.19.0
@@ -168,9 +170,7 @@ require (
 	github.com/sacloud/go-http v0.1.9 // indirect
 	github.com/sacloud/iaas-api-go v1.16.1 // indirect
 	github.com/sacloud/packages-go v0.0.11 // indirect
-	github.com/sagernet/sing v0.8.9 // indirect
 	github.com/sagernet/sing-shadowsocks v0.2.7 // indirect
-	github.com/sagernet/sing-shadowtls v0.2.1 // indirect
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
 	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.34 // indirect
@@ -237,4 +237,4 @@ require (
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
-replace github.com/xtls/xray-core v1.260711.0 => github.com/wyx2685/xray-core v0.0.0-20260713170150-b17a88f9b46d
+replace github.com/xtls/xray-core v1.260711.0 => github.com/betaxab/xray-core-wyx v0.0.0-20260812135110-d274dd6433b1
