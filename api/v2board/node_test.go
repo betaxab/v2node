@@ -1,9 +1,54 @@
 package panel
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestTlsSettingsUnmarshalShadowTLSVersionNumberOrString(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		json string
+		want int
+	}{
+		{name: "number", json: `{"shadow_tls_version":2}`, want: 2},
+		{name: "numeric string", json: `{"shadow_tls_version":"3"}`, want: 3},
+		{name: "empty historical string", json: `{"shadow_tls_version":""}`, want: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var settings TlsSettings
+			if err := json.Unmarshal([]byte(tt.json), &settings); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if settings.ShadowTLSVersion != tt.want {
+				t.Fatalf("ShadowTLSVersion = %d, want %d", settings.ShadowTLSVersion, tt.want)
+			}
+		})
+	}
+}
+
+func TestCommonNodeUnmarshalIgnoresHistoricalShadowTLSVersionForHysteria2(t *testing.T) {
+	data := []byte(`{
+		"protocol":"hysteria2",
+		"tls":1,
+		"tls_settings":{
+			"server_name":"hy2.example.test",
+			"shadow_tls_version":"2"
+		}
+	}`)
+
+	var node CommonNode
+	if err := json.Unmarshal(data, &node); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if node.TlsSettings.ShadowTLSVersion != 2 {
+		t.Fatalf("ShadowTLSVersion = %d, want 2", node.TlsSettings.ShadowTLSVersion)
+	}
+	if node.TlsSettings.ServerName != "hy2.example.test" {
+		t.Fatalf("ServerName = %q, want hy2.example.test", node.TlsSettings.ServerName)
+	}
+}
 
 func TestApplyNodeProtocolShadowTLSValid(t *testing.T) {
 	tests := []struct {
