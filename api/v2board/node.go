@@ -104,6 +104,46 @@ type TlsSettings struct {
 	WildcardSNI       string   `json:"wildcard_sni"`
 }
 
+func (t *TlsSettings) UnmarshalJSON(data []byte) error {
+	type tlsSettingsAlias TlsSettings
+	decoded := struct {
+		*tlsSettingsAlias
+		ShadowTLSVersion json.RawMessage `json:"shadow_tls_version"`
+	}{
+		tlsSettingsAlias: (*tlsSettingsAlias)(t),
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	rawVersion := strings.TrimSpace(string(decoded.ShadowTLSVersion))
+	if rawVersion == "" || rawVersion == "null" {
+		return nil
+	}
+	if rawVersion[0] == '"' {
+		var stringVersion string
+		if err := json.Unmarshal(decoded.ShadowTLSVersion, &stringVersion); err != nil {
+			return fmt.Errorf("decode shadow_tls_version: %w", err)
+		}
+		stringVersion = strings.TrimSpace(stringVersion)
+		if stringVersion == "" {
+			t.ShadowTLSVersion = 0
+			return nil
+		}
+		version, err := strconv.Atoi(stringVersion)
+		if err != nil {
+			return fmt.Errorf("decode shadow_tls_version: %w", err)
+		}
+		t.ShadowTLSVersion = version
+		return nil
+	}
+
+	if err := json.Unmarshal(decoded.ShadowTLSVersion, &t.ShadowTLSVersion); err != nil {
+		return fmt.Errorf("decode shadow_tls_version: %w", err)
+	}
+	return nil
+}
+
 type ShadowTLSHandshake struct {
 	ServerName string
 	Host       string
