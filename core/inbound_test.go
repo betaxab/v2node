@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -116,26 +117,40 @@ func TestBuildInboundOrdinaryShadowsocksStillBuilds(t *testing.T) {
 }
 
 func TestBuildInboundShadowsocks2022ServerKeyInvariants(t *testing.T) {
-	const serverKey = "server-key-sentinel"
-	node := ordinaryShadowsocksNodeInfo("2022-blake3-aes-128-gcm")
-	node.Common.ServerKey = serverKey
+	for _, tt := range []struct {
+		cipher    string
+		keyLength int
+	}{
+		{cipher: "2022-blake3-aes-128-gcm", keyLength: 16},
+		{cipher: "2022-blake3-aes-256-gcm", keyLength: 32},
+	} {
+		t.Run(tt.cipher, func(t *testing.T) {
+			serverKey := base64.StdEncoding.EncodeToString(make([]byte, tt.keyLength))
+			node := ordinaryShadowsocksNodeInfo(tt.cipher)
+			node.Common.ServerKey = serverKey
 
-	_, settings, _ := buildOrdinaryShadowsocksTestConfig(t, node, "ss2022-test")
-	if settings.Password != serverKey {
-		t.Fatalf("settings.Password = %q, want server key", settings.Password)
-	}
-	if len(settings.Users) != 1 {
-		t.Fatalf("settings.Users length = %d, want 1", len(settings.Users))
-	}
-	user := settings.Users[0]
-	if user.Cipher != "" {
-		t.Fatalf("default user cipher = %q, want empty for server-key mode", user.Cipher)
-	}
-	if user.Password == "" {
-		t.Fatalf("default user password is empty, want generated password")
-	}
-	if user.Password == serverKey {
-		t.Fatalf("default user password equals server key, want generated password")
+			_, settings, _ := buildOrdinaryShadowsocksTestConfig(t, node, "ss2022-test")
+			if settings.Password != serverKey {
+				t.Fatalf("settings.Password = %q, want server key", settings.Password)
+			}
+			if len(settings.Users) != 1 {
+				t.Fatalf("settings.Users length = %d, want 1", len(settings.Users))
+			}
+			user := settings.Users[0]
+			if user.Cipher != "" {
+				t.Fatalf("default user cipher = %q, want empty for server-key mode", user.Cipher)
+			}
+			userKey, err := base64.StdEncoding.DecodeString(user.Password)
+			if err != nil {
+				t.Fatalf("decode default user password: %v", err)
+			}
+			if len(userKey) != tt.keyLength {
+				t.Fatalf("default user key length = %d, want %d", len(userKey), tt.keyLength)
+			}
+			if user.Password == serverKey {
+				t.Fatalf("default user password equals server key, want generated password")
+			}
+		})
 	}
 }
 
