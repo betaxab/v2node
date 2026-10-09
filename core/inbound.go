@@ -358,16 +358,13 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	settings := &coreConf.ShadowsocksServerConfig{
 		Cipher: s.Cipher,
 	}
-	p := make([]byte, 32)
-	_, err := rand.Read(p)
-	if err != nil {
-		return fmt.Errorf("generate random password error: %s", err)
-	}
-	randomPasswd := hex.EncodeToString(p)
 	cipher := s.Cipher
+	randomPasswd, err := generateShadowsocksBootstrapPassword(cipher, s.ServerKey != "")
+	if err != nil {
+		return err
+	}
 	if s.ServerKey != "" {
 		settings.Password = s.ServerKey
-		randomPasswd = base64.StdEncoding.EncodeToString([]byte(randomPasswd))
 		cipher = ""
 	}
 	defaultSSuser := &coreConf.ShadowsocksUserConfig{
@@ -428,6 +425,29 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 		return fmt.Errorf("marshal shadowsocks settings error: %s", err)
 	}
 	return nil
+}
+
+func generateShadowsocksBootstrapPassword(cipher string, serverKeyMode bool) (string, error) {
+	keyLength := 32
+	if serverKeyMode {
+		switch cipher {
+		case "2022-blake3-aes-128-gcm":
+			keyLength = 16
+		case "2022-blake3-aes-256-gcm":
+			keyLength = 32
+		default:
+			return "", fmt.Errorf("unsupported Shadowsocks 2022 cipher for server key: %s", cipher)
+		}
+	}
+
+	key := make([]byte, keyLength)
+	if _, err := rand.Read(key); err != nil {
+		return "", fmt.Errorf("generate random password error: %s", err)
+	}
+	if serverKeyMode {
+		return base64.StdEncoding.EncodeToString(key), nil
+	}
+	return hex.EncodeToString(key), nil
 }
 
 func buildHysteria2(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
